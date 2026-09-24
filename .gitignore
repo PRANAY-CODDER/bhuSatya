@@ -1,0 +1,12 @@
+node_modules/
+.next/
+.env
+.env.*
+!.env.example
+
+# TypeScript build metadata
+*.tsbuildinfo
+
+# Local editor and OS files
+.vscode/
+.DS_Store

@@ -1,10 +1,26 @@
-// MOCK EXTRACTION — for demo/study purposes only. Does not read the actual uploaded file. Replace with a real OCR/AI call before any real-world use.
-
+import { createCanvas } from "@napi-rs/canvas";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import sharp from "sharp";
+import { createWorker, OEM } from "tesseract.js";
 import { NextResponse } from "next/server";
+import path from "node:path";
+import { extractFields, type FieldExtractionResult } from "@/lib/nlp/extractFields";
 
 export const runtime = "nodejs";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_OCR_DIMENSION = 3_000;
+const LANG_PATH = path.join(process.cwd(), "public", "tesseract-lang");
+const TESSERACT_WORKER_PATH = path.join(
+  process.cwd(),
+  "node_modules",
+  "tesseract.js",
+  "src",
+  "worker-script",
+  "node",
+  "index.js",
+);
+const USE_MOCK = process.env.USE_MOCK_EXTRACTION === "true";
 const acceptedTypes = new Map([
   ["application/pdf", [".pdf"]],
   ["image/jpeg", [".jpg", ".jpeg"]],
@@ -13,152 +29,102 @@ const acceptedTypes = new Map([
   ["image/tif", [".tif", ".tiff"]],
 ]);
 
-const fieldNames = [
-  "recordNo",
-  "ownerName",
-  "fatherName",
-  "khasraNo",
-  "village",
-  "district",
-  "state",
-  "areaValue",
-  "areaUnit",
-  "landType",
-  "mutationType",
-  "sourceDoc",
-  "lat",
-  "lng",
-  "notes",
-] as const;
+type OcrLine = { text: string; confidence: number };
 
-type ExtractedFieldName = (typeof fieldNames)[number];
-type MockProfile = Record<ExtractedFieldName, string>;
-type ExtractedField = { value: string; confidence: number };
-
-const MOCK_PROFILES: MockProfile[] = [
-  {
-    recordNo: "LR-2025-031",
-    ownerName: "Ramesh Kumar",
-    fatherName: "Sh. Baldev Singh",
-    khasraNo: "411/2",
-    village: "Sahnewal",
-    district: "Ludhiana",
-    state: "Punjab",
-    areaValue: "1.77",
-    areaUnit: "acres",
-    landType: "agricultural",
-    mutationType: "inheritance",
-    sourceDoc: "Jamabandi",
-    lat: "30.844000",
-    lng: "75.976000",
-    notes: "Inherited agricultural holding.",
-  },
-  {
-    recordNo: "LR-2025-036",
-    ownerName: "Gurmeet Kaur",
-    fatherName: "Sh. Joginder Singh",
-    khasraNo: "612/1",
-    village: "Kila Raipur",
-    district: "Ludhiana",
-    state: "Punjab",
-    areaValue: "2.51",
-    areaUnit: "acres",
-    landType: "orchard",
-    mutationType: "sale",
-    sourceDoc: "Sale Deed",
-    lat: "30.762000",
-    lng: "75.815000",
-    notes: "Sale mutation recorded in current jamabandi.",
-  },
-  {
-    recordNo: "LR-2025-041",
-    ownerName: "Sukhwinder Singh",
-    fatherName: "Sh. Mohan Singh",
-    khasraNo: "708/3",
-    village: "Verka",
-    district: "Amritsar",
-    state: "Punjab",
-    areaValue: "0.94",
-    areaUnit: "kanals",
-    landType: "residential",
-    mutationType: "gift",
-    sourceDoc: "Mutation Record",
-    lat: "31.662000",
-    lng: "74.930000",
-    notes: "Residential parcel transferred by gift.",
-  },
-  {
-    recordNo: "LR-2025-045",
-    ownerName: "Simran Kaur Dhillon",
-    fatherName: "Sh. Harjinder Singh Dhillon",
-    khasraNo: "903/4",
-    village: "Nabha",
-    district: "Patiala",
-    state: "Punjab",
-    areaValue: "3.18",
-    areaUnit: "acres",
-    landType: "agricultural",
-    mutationType: "partition",
-    sourceDoc: "Khatoni",
-    lat: "30.377000",
-    lng: "76.147000",
-    notes: "Partition entry with updated co-sharer details.",
-  },
-  {
-    recordNo: "LR-2025-052",
-    ownerName: "Amandeep Singh Gill",
-    fatherName: "Sh. Surjit Singh Gill",
-    khasraNo: "1042/1",
-    village: "Kathu Nangal",
-    district: "Amritsar",
-    state: "Punjab",
-    areaValue: "4.62",
-    areaUnit: "acres",
-    landType: "agricultural",
-    mutationType: "will",
-    sourceDoc: "Fard",
-    lat: "31.748000",
-    lng: "74.782000",
-    notes: "Fard issued against registered will.",
-  },
-];
+let workerPromise: ReturnType<typeof createWorker> | null = null;
 
 function getExtension(fileName: string): string {
   return fileName.toLowerCase().match(/\.[a-z0-9]+$/)?.[0] ?? "";
 }
-
 function isAcceptedFile(file: File): boolean {
   const extensions = acceptedTypes.get(file.type);
   return Boolean(extensions?.includes(getExtension(file.name)));
 }
 
-function confidenceForField(fieldName: ExtractedFieldName, lowConfidenceField: ExtractedFieldName | null): number {
-  if (fieldName === lowConfidenceField) return 65 + Math.floor(Math.random() * 14);
-  return 85 + Math.floor(Math.random() * 14);
+async function getOcrWorker() {
+  workerPromise ??= createWorker("hin+eng", OEM.LSTM_ONLY, {
+    langPath: LANG_PATH,
+    workerPath: TESSERACT_WORKER_PATH,
+    gzip: false,
+    cacheMethod: "none",
+  });
+  return workerPromise;
 }
 
-function buildExtraction(profile: MockProfile): {
-  rawText: string;
-  fields: Record<ExtractedFieldName, ExtractedField>;
-  ocrConfidence: number;
-} {
-  const lowConfidenceField = Math.random() < 0.7
-    ? fieldNames[Math.floor(Math.random() * fieldNames.length)]
-    : null;
-  const fields = Object.fromEntries(
-    fieldNames.map((fieldName) => [
-      fieldName,
-      { value: profile[fieldName], confidence: confidenceForField(fieldName, lowConfidenceField) },
-    ]),
-  ) as Record<ExtractedFieldName, ExtractedField>;
-  const confidenceValues = Object.values(fields).map((field) => field.confidence);
-  const ocrConfidence = Math.round(confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length);
+async function prepareImage(input: Buffer): Promise<Buffer> {
+  return sharp(input)
+    .rotate()
+    .resize({
+      width: MAX_OCR_DIMENSION,
+      height: MAX_OCR_DIMENSION,
+      fit: "inside",
+      withoutEnlargement: true,
+    })
+    .png()
+    .toBuffer();
+}
+
+async function readPdf(input: Buffer): Promise<{ text: string; image?: Buffer }> {
+  const loadingTask = getDocument({ data: new Uint8Array(input) });
+  const pdf = await loadingTask.promise;
+  try {
+    const page = await pdf.getPage(1);
+    const textContent = await page.getTextContent();
+    const text = textContent.items
+      .map((item) => ("str" in item ? item.str : ""))
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (text.length >= 20) return { text };
+
+    const baseViewport = page.getViewport({ scale: 1 });
+    const scale = Math.min(2, MAX_OCR_DIMENSION / Math.max(baseViewport.width, baseViewport.height));
+    const viewport = page.getViewport({ scale: Math.max(1, scale) });
+    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    await page.render({
+      canvas: canvas as unknown as HTMLCanvasElement,
+      canvasContext: canvas.getContext("2d") as unknown as CanvasRenderingContext2D,
+      viewport,
+    }).promise;
+    return { text: "", image: canvas.toBuffer("image/png") };
+  } finally {
+    await loadingTask.destroy();
+  }
+}
+async function recognize(input: Buffer) {
+  const worker = await getOcrWorker();
+  const result = await worker.recognize(input, {}, { text: true, blocks: true });
+  const blocks = result.data.blocks ?? [];
+  const lines: OcrLine[] = blocks.flatMap((block) =>
+    block.paragraphs.flatMap((paragraph) => paragraph.lines.map((line) => ({
+      text: line.text,
+      confidence: line.confidence,
+    }))),
+  );
 
   return {
-    rawText: `Punjab Revenue Department\nJAMABANDI - RECORD OF RIGHTS\nRecord No: ${profile.recordNo}\nOwner: ${profile.ownerName}\nFather name: ${profile.fatherName}\nKhasra No: ${profile.khasraNo}\nVillage: ${profile.village}\nDistrict: ${profile.district}\nArea: ${profile.areaValue} ${profile.areaUnit}\nLand type: ${profile.landType}\nMutation type: ${profile.mutationType}\nSource document: ${profile.sourceDoc}`,
-    fields,
-    ocrConfidence,
+    text: result.data.text.trim(),
+    confidence: Math.round(result.data.confidence),
+    lines,
   };
+}
+
+function buildMockExtraction(): FieldExtractionResult {
+  const rawText = [
+    "Record No: LR-2025-031",
+    "Owner Name: Ramesh Kumar",
+    "Father's Name: Sh. Baldev Singh",
+    "Khasra No.: 411/2",
+    "Village: Sahnewal",
+    "District: Ludhiana",
+    "State: Punjab",
+    "Area: 1.77 acres",
+    "Land Type: agricultural",
+    "Mutation Type: inheritance",
+    "Source Document: Jamabandi",
+  ].join("\n");
+  return extractFields(rawText, rawText.split("\n").map((text) => ({ text, confidence: 98 })), 98);
 }
 
 export async function POST(request: Request) {
@@ -168,29 +134,39 @@ export async function POST(request: Request) {
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "Upload a file in the 'file' field." }, { status: 400 });
     }
-
     if (file.size === 0 || file.size > MAX_FILE_SIZE) {
-      return NextResponse.json(
-        { error: "File must be non-empty and no larger than 10 MB." },
-        { status: 413 },
-      );
+      return NextResponse.json({ error: "File must be non-empty and no larger than 10 MB." }, { status: 413 });
     }
-
     if (!isAcceptedFile(file)) {
-      return NextResponse.json(
-        { error: "Only PDF, JPG, JPEG, PNG, and TIFF files are accepted." },
-        { status: 415 },
-      );
+      return NextResponse.json({ error: "Only PDF, JPG, JPEG, PNG, and TIFF files are accepted." }, { status: 415 });
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 1500 + Math.floor(Math.random() * 1301)));
-    const profile = MOCK_PROFILES[Math.floor(Math.random() * MOCK_PROFILES.length)];
-    return NextResponse.json(buildExtraction(profile));
+    if (USE_MOCK) return NextResponse.json(buildMockExtraction());
+
+    const input = Buffer.from(await file.arrayBuffer());
+    let rawText = "";
+    let ocrConfidence = 0;
+    let lines: OcrLine[] = [];
+
+    if (file.type === "application/pdf") {
+      const pdf = await readPdf(input);
+      if (pdf.text) {
+        rawText = pdf.text;
+        ocrConfidence = 100;
+      } else {
+        const result = await recognize(await prepareImage(pdf.image!));
+        ({ text: rawText, confidence: ocrConfidence, lines } = result);
+      }
+    } else {
+      const result = await recognize(await prepareImage(input));
+      ({ text: rawText, confidence: ocrConfidence, lines } = result);
+    }
+
+    // Tesseract works well on typed, printed, and clearly scanned text. It performs poorly on cursive handwritten Devanagari, which is a known open-source OCR limitation.
+    const extraction = extractFields(rawText, lines, ocrConfidence);
+    return NextResponse.json(extraction);
   } catch (error) {
     console.error("Land-record extraction failed", error);
-    return NextResponse.json(
-      { error: "Land-record extraction failed. Please try again." },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "Land-record extraction failed. Please try again." }, { status: 500 });
   }
 }

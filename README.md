@@ -4,13 +4,13 @@ BhuSatya is a land-record digitization workspace for turning scanned revenue doc
 
 The project is built as a Next.js application. It includes a dashboard for record operations, a review queue for low-confidence entries, GIS views, analytics, an audit trail, a local knowledge bank, and export/backup tools.
 
-> **Current status:** BhuSatya is a functional prototype. The application has a complete demo workflow and a PostgreSQL data layer, but document OCR and field extraction are represented by mock responses in the current source. Do not use the current extraction flow for real records without connecting a production OCR service and adding the required security and operational controls.
+> **Current status:** BhuSatya is a functional prototype. The application has a complete demo workflow, a PostgreSQL data layer, and a local Tesseract OCR pipeline. Field mapping currently uses schema-aware text patterns, so extracted values still require officer review before real-world use.
 
 ## What the application does
 
 - **Dashboard:** Shows record volume, processing status, confidence, recent activity, and review workload.
 - **Repository:** Searches and filters land records, opens record details, and exports CSV or XLSX files.
-- **Upload and extraction:** Accepts PDF and image uploads, starts a record-processing workflow, and displays extracted fields with confidence values. The current extraction route uses sample profiles for demonstration.
+- **Upload and extraction:** Accepts PDF and image uploads, runs local OCR, and maps bilingual labels into the record metadata form with per-field confidence values.
 - **Validation:** Checks required fields, area limits, overall confidence, and the number of extracted fields above the review threshold.
 - **Human review:** Lets an officer verify, reject, flag, or return records for review instead of requiring every record to be typed manually.
 - **GIS map:** Displays parcel locations from record latitude and longitude values.
@@ -32,6 +32,10 @@ The project is built as a Next.js application. It includes a dashboard for recor
 - Recharts for analytics
 - XLSX for spreadsheet export
 - Zod for request validation in selected API paths
+- Tesseract.js with local Hindi and English trained data for offline OCR
+- PDF.js and native canvas rendering for PDF text extraction and scanned-page OCR
+
+Field mapping is deliberately rule-based rather than a trained ML model. It matches known Hindi/English labels, tolerates small OCR spelling errors, and uses document shape patterns for values such as khasra numbers and area. Accuracy depends on how closely a document follows those known labels, so officers should review every extracted record.
 
 ## Requirements
 
@@ -62,6 +66,8 @@ DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/app_db
 BHULEKH_LOCAL_MODE=true
 HF_TOKEN=
 ```
+
+OCR language data is committed under `public/tesseract-lang/`. The extraction route loads `hin.traineddata` and `eng.traineddata` from that local directory, so OCR does not need a CDN, API key, or network connection at runtime.
 
 Start the development server:
 
@@ -156,7 +162,7 @@ The main API groups are:
 | Records | `/api/records`, `/api/records/[id]` | Search, create, update, delete, and export records |
 | Validation | `/api/records/[id]/validate` | Run validation checks and update record status |
 | Suggestions | `/api/records/[id]/suggestions/*` | Review and apply extracted-field suggestions |
-| Documents | `/api/documents/upload`, `/api/documents/extract` | Accept documents and return demo extraction data |
+| Documents | `/api/documents/upload`, `/api/documents/extract` | Accept documents and return OCR/extracted field data |
 | Assistant | `/api/ai/chat`, `/api/knowledge/chat` | Answer workspace questions |
 | Operations | `/api/health`, `/api/integration/health`, `/api/backup` | Health checks and JSON backup |
 | Activity | `/api/activity`, `/api/notifications`, `/api/stats` | Operational activity, notifications, and dashboard statistics |
@@ -170,12 +176,14 @@ All protected pages and most operational routes require the session cookie creat
 | `DATABASE_URL` | Yes | PostgreSQL connection string used by Drizzle |
 | `BHULEKH_LOCAL_MODE` | For demo mode | Set to `true` for in-memory auth and sample data; set to `false` for database-backed sessions and records |
 | `HF_TOKEN` | No | Hugging Face Inference API token for optional assistant responses |
+| `USE_MOCK_EXTRACTION` | No | Set to `true` to use the retained deterministic mock extractor for a demo fallback; defaults to the local OCR and rule-based extractor |
 
 Never commit `.env`. The repository includes `.env.example` for the non-secret configuration shape.
 
 ## Current limitations
 
-- `src/app/api/documents/extract/route.ts` validates file type and size but does not read the uploaded document. It selects a mock extraction profile and generates confidence values.
+- `src/app/api/documents/extract/route.ts` uses local Tesseract.js for JPG, PNG, and TIFF files. For PDFs it uses an embedded text layer when available, otherwise it rasterizes the first page and runs the same OCR pipeline. The current route processes only the first PDF page.
+- OCR is strongest on typed, printed, and clearly scanned documents. Cursive handwritten Devanagari remains difficult for open-source OCR and should be treated as a review case.
 - `src/app/api/documents/upload/route.ts` accepts upload metadata but does not persist the file or connect it to an OCR worker.
 - Local mode stores state in memory and is intended for demos, not shared use.
 - The application does not yet provide a production migration command or background worker setup.
@@ -184,7 +192,7 @@ Never commit `.env`. The repository includes `.env.example` for the non-secret c
 
 ## Before production use
 
-At minimum, replace the mock extraction path with a secured OCR/document-processing service, persist source documents in controlled storage, add a proper migration and deployment process, rotate demo credentials, review authorization by role, and add automated tests for upload, extraction, validation, export, and backup flows.
+At minimum, persist source documents in controlled storage, add a proper migration and deployment process, rotate demo credentials, review authorization by role, strengthen field extraction for the records in scope, and add automated tests for upload, OCR, validation, export, and backup flows.
 
 ## License
 
